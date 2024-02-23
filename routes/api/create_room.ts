@@ -9,7 +9,7 @@ export const handler: Handlers = {
     const database = await databaseLoader.getInstance();
     const roomId = await database.ensureRoom(name);
 
-    return new Response(roomId, {
+    return new Response(roomId.toString(), {
       status: 201,
     });
   },
