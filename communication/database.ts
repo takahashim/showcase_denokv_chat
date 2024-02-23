@@ -1,7 +1,15 @@
+/// <reference lib="deno.unstable" />
+
 import { ResourceLoader } from "../helpers/loader.ts";
-import postgres from "$postgres";
-import * as supabase from "supabase";
 import type { MessageView } from "./types.ts";
+import { ulid } from "ulid";
+
+const USER_KEY = "user";
+const USER_TOKEN_KEY = "user_tk";
+const ROOM_WITH_ACTIVITY_KEY = "room_act";
+const ROOM_WITH_NAME_KEY = "room_name";
+const MESSAGE_KEY = "msg";
+const NEXT_ROOM_ID_KEY = "next_room_id";
 
 export interface DatabaseUser {
   userId: number;
@@ -9,30 +17,41 @@ export interface DatabaseUser {
   avatarUrl: string;
 }
 
-export class Database {
-  #client: supabase.SupabaseClient;
+export interface Message {
+  message: string;
+  from: {
+    username: string;
+    avatarUrl: string;
+  };
+  createdAt: string;
+}
 
-  constructor(client?: supabase.SupabaseClient) {
-    this.#client = client ?? supabase.createClient(
-      Deno.env.get("SUPABASE_API_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-    );
+export interface Room {
+  roomId: number;
+  name: string;
+  createdAt: string;
+  lastMessageAt: string | undefined;
+}
+
+export class Database {
+  #client: Deno.Kv;
+
+  constructor(client: Deno.Kv) {
+    this.#client = client;
   }
 
   async insertUser(user: DatabaseUser & { accessToken: string }) {
-    const { error } = await this.#client
-      .from("users")
-      .upsert([
-        {
-          id: user.userId,
-          username: user.userName,
-          avatar_url: user.avatarUrl,
-          access_token: user.accessToken,
-        },
-      ], { returning: "minimal" });
-    if (error) {
-      throw new Error(error.message);
-    }
+    const newUser = {
+      ...user,
+      createdAt: new Date().toISOString(),
+    };
+
+    const kv = this.#client;
+    await kv.atomic()
+      .check({ key: [USER_KEY, user.userId], versionstamp: null })
+      .set([USER_KEY, user.userId], newUser)
+      .set([USER_TOKEN_KEY, user.accessToken], user.userId)
+      .commit();
   }
 
   async getUserByAccessTokenOrThrow(
@@ -48,158 +67,200 @@ export class Database {
   async getUserByAccessToken(
     accessToken: string,
   ): Promise<DatabaseUser | undefined> {
-    const { data, error } = await this.#client
-      .from("users")
-      .select("id,username,avatar_url")
-      .eq("access_token", accessToken);
-    if (error) {
-      throw new Error(error.message);
+    const userIdEntry = await this.#client.get<number>([
+      USER_TOKEN_KEY,
+      accessToken,
+    ]);
+    if (userIdEntry.value !== null) {
+      const userEntry = await this.#client.get<DatabaseUser>([
+        USER_KEY,
+        userIdEntry.value,
+      ]);
+      if (userEntry.value !== null) {
+        return userEntry.value;
+      }
     }
-    if (data.length === 0) {
-      return undefined;
-    }
-    return {
-      userId: data[0].id,
-      userName: data[0].username,
-      avatarUrl: data[0].avatar_url,
-    };
+    return undefined;
   }
 
-  async getRooms() {
-    const { data, error } = await this.#client.from("rooms_with_activity")
-      .select(
-        "id,name,last_message_at",
-      );
-    if (error) {
-      throw new Error(error.message);
+  async getRooms(): Promise<Room[]> {
+    const roomsEntries = this.#client.list<Room>({
+      prefix: [ROOM_WITH_ACTIVITY_KEY],
+    });
+
+    const rooms: Room[] = [];
+    for await (const entry of roomsEntries) {
+      if (entry.value !== null) {
+        rooms.push(entry.value);
+      }
     }
-    return data.map((d) => ({
-      roomId: d.id,
-      name: d.name,
-      lastMessageAt: d.last_message_at,
-    }));
+    return rooms;
   }
 
   async getRoomName(roomId: number): Promise<string> {
-    const { data, error } = await this.#client.from("rooms")
-      .select("name")
-      .eq("id", roomId);
-    if (error) {
-      throw new Error(error.message);
+    const roomEntry = await this.#client.get<Room>([
+      ROOM_WITH_ACTIVITY_KEY,
+      roomId,
+    ]);
+    if (roomEntry.value === null) {
+      return "";
     }
-    return data[0].name;
+    return roomEntry.value.name;
+  }
+
+  async getRoomByName(name: string) {
+    const roomEntry = await this.#client.get<Room>([ROOM_WITH_NAME_KEY, name]);
+    if (roomEntry.value === null) {
+      return undefined;
+    }
+    return roomEntry.value;
+  }
+
+  async nextRoomId(): Promise<number> {
+    const nextRoomIdEntry = await this.#client.get<Deno.KvU64>([
+      NEXT_ROOM_ID_KEY,
+    ]);
+    if (nextRoomIdEntry.value === null) {
+      throw new Error("Next room id not found");
+    }
+    // cast from bigint to number
+    const roomId = Number(nextRoomIdEntry.value.value);
+    const res = await this.#client.atomic()
+      .check(nextRoomIdEntry)
+      .mutate({
+        type: "sum",
+        key: nextRoomIdEntry.key,
+        value: new Deno.KvU64(1n),
+      })
+      .commit();
+    if (!res.ok) {
+      throw new Error(`Failed to increment roomId: ${roomId}`);
+    }
+
+    return roomId;
+  }
+
+  async findOrInsertRoom(name: string): Promise<Room> {
+    const newRoom: Room = {
+      roomId: await this.nextRoomId(),
+      name,
+      createdAt: new Date().toISOString(),
+      lastMessageAt: undefined,
+    };
+
+    const primaryKey = [ROOM_WITH_ACTIVITY_KEY, newRoom.roomId];
+    const secondaryKey = [ROOM_WITH_NAME_KEY, name];
+
+    const res = await this.#client.atomic()
+      .check({ key: primaryKey, versionstamp: null })
+      .check({ key: secondaryKey, versionstamp: null })
+      .set(primaryKey, newRoom)
+      .set(secondaryKey, newRoom)
+      .commit();
+
+    if (res.ok) {
+      return newRoom;
+    } else {
+      const roomEntry = await this.#client.get<Room>(secondaryKey);
+      if (roomEntry.value === null) {
+        throw new Error("faild to insert new room");
+      }
+      return roomEntry.value;
+    }
   }
 
   async ensureRoom(name: string) {
-    const insert = await this.#client.from("rooms").insert([{ name }], {
-      upsert: false,
-      returning: "representation",
-    });
-
-    if (insert.error) {
-      if (insert.error.code !== "23505") {
-        throw new Error(insert.error.message);
-      }
-      const get = await this.#client.from("rooms").select("id").eq(
-        "name",
-        name,
-      );
-      if (get.error) {
-        throw new Error(get.error.message);
-      }
-      return get.data[0].id;
-    }
-
-    return insert.data![0].id;
+    const room = await this.findOrInsertRoom(name);
+    return room.roomId;
   }
 
   async insertMessage(
-    message: { text: string; roomId: number; userId: number },
+    message: { text: string; roomId: number; user: DatabaseUser },
   ) {
+    const messageId = ulid();
+    const newMessage = {
+      message: message.text,
+      from: {
+        userId: message.user.userId,
+        username: message.user.userName,
+        avatarUrl: message.user.avatarUrl,
+      },
+      createdAt: new Date().toISOString(),
+    };
+    const roomEntry = await this.#client.get<Room>([
+      ROOM_WITH_ACTIVITY_KEY,
+      message.roomId,
+    ]);
+    if (roomEntry.value === null) {
+      throw new Error("Room not found");
+    }
+    const room = roomEntry.value;
+
     await this.#client
-      .from("messages")
-      .insert([{
-        message: message.text,
-        room: message.roomId,
-        from: message.userId,
-      }], { returning: "minimal" });
+      .atomic()
+      .set([MESSAGE_KEY, message.roomId, messageId], newMessage)
+      .set([ROOM_WITH_ACTIVITY_KEY, message.roomId], {
+        ...room,
+        lastMessageAt: newMessage.createdAt,
+      })
+      .commit();
   }
 
   async getRoomMessages(roomId: number): Promise<MessageView[]> {
-    const { data, error } = await this.#client
-      .from("messages")
-      .select("message,from(username,avatar_url),created_at")
-      .eq("room", roomId);
-    if (error) {
-      throw new Error(error.message);
+    const messageEntries = await this.#client.list<Message>({
+      prefix: [MESSAGE_KEY, roomId],
+    });
+    const messages: MessageView[] = [];
+    for await (const entry of messageEntries) {
+      if (entry.value !== null) {
+        const currentMessage = {
+          message: entry.value.message,
+          from: {
+            name: entry.value.from.username,
+            avatarUrl: entry.value.from.avatarUrl,
+          },
+          createdAt: entry.value.createdAt,
+        };
+        messages.push(currentMessage);
+      }
     }
-    return data.map((m) => ({
-      message: m.message,
-      from: {
-        name: m.from.username,
-        avatarUrl: m.from.avatar_url,
-      },
-      createdAt: m.created_at,
-    }));
+    return messages;
   }
 }
 
 export const databaseLoader = new ResourceLoader<Database>({
   async load() {
-    // Automatically create the database schema on startup.
-    const caCert = getEnvOrThrow("SUPABASE_CA_CERTIFICATE").replace(
-      /\s+(?!CERTIFICATE--)/g,
-      "\n",
-    );
-    const sql = postgres(getEnvOrThrow("SUPABASE_POSTGRES_URI"), {
-      keep_alive: false, // Otherwise required '--unstable' flag.
-      ssl: { caCerts: [caCert] },
-    });
-    await sql`
-      create table if not exists users (
-        id integer generated by default as identity primary key,
-        created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-        username text unique,
-        avatar_url text,
-        access_token text
-      )`;
-    await sql`
-      create table if not exists rooms (
-        id integer generated by default as identity primary key,
-        created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-        name text unique not null
-      )`;
-    await sql`
-      create table if not exists messages (
-        id integer generated by default as identity primary key,
-        created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-        message text,
-        "from" integer references users (id),
-        "room" integer references rooms (id)
-      )`;
-    await sql`
-      create or replace view rooms_with_activity
-      as select
-        rooms.id as id,
-        rooms.name as name,
-        max(messages.created_at) as last_message_at
-      from rooms
-      left join messages on messages.room = rooms.id
-      group by rooms.id
-      order by last_message_at desc nulls last`;
-    await sql`
-      insert into rooms (id, name)
-      values (0, 'Lobby')
-      on conflict(id) do nothing`;
-    await sql.end();
-    return Promise.resolve(new Database());
+    const kv = await Deno.openKv();
 
-    function getEnvOrThrow(name: string) {
-      const value = Deno.env.get(name);
-      if (value == null) {
-        throw new Error(`Missing env variable: ${name}`);
-      }
-      return value;
+    const newRoom: Room = {
+      roomId: 0,
+      name: "Lobby",
+      createdAt: new Date().toISOString(),
+      lastMessageAt: undefined,
+    };
+    const primaryKey = [ROOM_WITH_ACTIVITY_KEY, newRoom.roomId];
+    const secondaryKey = [ROOM_WITH_NAME_KEY, newRoom.name];
+
+    const res = await kv.atomic()
+      .check({ key: primaryKey, versionstamp: null })
+      .check({ key: secondaryKey, versionstamp: null })
+      .set(primaryKey, newRoom)
+      .set(secondaryKey, newRoom)
+      .commit();
+
+    if (!res.ok) {
+      console.error("Failed to create lobby room");
     }
+
+    const res2 = await kv.atomic()
+      .check({ key: [NEXT_ROOM_ID_KEY], versionstamp: null })
+      .set([NEXT_ROOM_ID_KEY], new Deno.KvU64(1n))
+      .commit();
+
+    if (!res2.ok) {
+      console.error("Failed to create roomId counter");
+    }
+
+    return Promise.resolve(new Database(kv));
   },
 });

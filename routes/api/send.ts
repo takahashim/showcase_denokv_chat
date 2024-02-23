@@ -43,7 +43,7 @@ export async function handler(
   await database.insertMessage({
     text: message,
     roomId: data.roomId,
-    userId: user.userId,
+    user: user,
   });
 
   return new Response("OK");
