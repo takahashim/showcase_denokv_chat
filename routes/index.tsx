@@ -54,7 +54,7 @@ export default function Main({ url, data }: PageProps<{ rooms: RoomView[] }>) {
   return (
     <>
       <Head>
-        <title>Deno Chat</title>
+        <title>Deno KV Chat</title>
       </Head>
       <img
         src="/background.png"
@@ -70,7 +70,7 @@ export default function Main({ url, data }: PageProps<{ rooms: RoomView[] }>) {
               alt="Deno Logo"
             />
             <span class="block text-3xl font-bold text-black mb-3">
-              Deno Chat
+              Deno KV Chat
             </span>
             <span class="block text-lg -mb-1.5">
               A minimal chat platform template.
@@ -88,11 +88,11 @@ export default function Main({ url, data }: PageProps<{ rooms: RoomView[] }>) {
               {" + "}
               <a
                 class="font-bold underline"
-                href="https://supabase.com"
+                href="https://deno.com/kv"
                 rel="noopener noreferrer"
                 target="_blank"
               >
-                Supabase
+                Deno KV
               </a>
               {" + "}
               <a
