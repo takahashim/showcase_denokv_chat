@@ -1,4 +1,4 @@
-import { HandlerContext } from "$fresh/server.ts";
+import { FreshContext } from "$fresh/server.ts";
 import { getCookies } from "$std/http/cookie.ts";
 import { emojify } from "emojify";
 import { databaseLoader } from "@/communication/database.ts";
@@ -8,7 +8,7 @@ import { ApiSendMessage } from "@/communication/types.ts";
 
 export async function handler(
   req: Request,
-  _ctx: HandlerContext,
+  _ctx: FreshContext,
 ): Promise<Response> {
   const accessToken = getCookies(req.headers)["deploy_chat_token"];
   if (!accessToken) {

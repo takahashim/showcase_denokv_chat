@@ -1,4 +1,4 @@
-import { Handler, HandlerContext, PageProps } from "$fresh/server.ts";
+import { FreshContext, Handler, PageProps } from "$fresh/server.ts";
 import { Head } from "$fresh/runtime.ts";
 import { getCookies } from "$std/http/cookie.ts";
 import { databaseLoader } from "@/communication/database.ts";
@@ -14,7 +14,7 @@ interface Data {
 
 export const handler: Handler<Data> = async (
   req: Request,
-  ctx: HandlerContext<Data>,
+  ctx: FreshContext,
 ): Promise<Response> => {
   // Get cookie from request header and parse it
   const accessToken = getCookies(req.headers)["deploy_chat_token"];

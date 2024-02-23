@@ -1,4 +1,4 @@
-import { HandlerContext, PageProps } from "$fresh/server.ts";
+import { FreshContext, PageProps } from "$fresh/server.ts";
 import { Head } from "$fresh/runtime.ts";
 import twas from "twas";
 import { getCookies, setCookie } from "$std/http/cookie.ts";
@@ -9,7 +9,7 @@ import type { RoomView } from "@/communication/types.ts";
 
 export async function handler(
   req: Request,
-  ctx: HandlerContext,
+  ctx: FreshContext,
 ): Promise<Response> {
   // Get cookie from request header and parse it
   const maybeAccessToken = getCookies(req.headers)["deploy_chat_token"];
